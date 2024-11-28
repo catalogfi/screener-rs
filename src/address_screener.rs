@@ -61,6 +61,7 @@ impl<T: Screener, S: ScreenerCache> AddressScreener<T, S> {
             Ok(combined_response)
         } else {
             // we found nothing in db
+            dbg!("Nothing found in screener cache");
             let res = self.screener.is_blacklisted(addresses).await?;
             self.screener_cache.mark_blacklisted(&res).await?;
             Ok(res)
@@ -84,11 +85,17 @@ mod tests {
     #[tokio::test]
     async fn test_screener() {
         let screener_cache = Arc::new(
-            TrmScreenerCache::from_psql_url("postgres://postgres:postgres@localhost:5433/garden")
+            TrmScreenerCache::from_psql_url("postgres://postgres:root@localhost:5432/garden")
                 .await
                 .unwrap(),
         );
         let key = env::var("SCREENING_KEY").expect("export SCREENING_KEY in the shell");
+        
+        let trm_cache= Cache::builder()
+                        .max_capacity(1000)
+                        .time_to_live(Duration::from_secs(10))
+                        .build();
+
         let trm_screener = Arc::new(
             TrmScreener::builder()
                 .api_key(key)
@@ -96,24 +103,89 @@ mod tests {
                 .batch_size(5)
                 .risk_score_limit(10)
                 .cache(
-                    Cache::builder()
-                        .max_capacity(1000)
-                        .time_to_live(Duration::from_secs(200))
-                        .build(),
+                   trm_cache
                 )
                 .build(),
         );
 
         let address_screener = AddressScreener::new(trm_screener, screener_cache.clone());
 
+        // let addresses = vec![AddressInfo {
+        //     chain: "ethereum".to_string(),
+        //     address: "0x699A8B34420A2a3bA1817b2C061ed852448F4170".to_string(),
+        // }];
         let addresses = vec![AddressInfo {
+                chain: "bitcoin".to_string(),
+                address: "bc1qng0keqn7cq6p8qdt4rjnzdxrygnzq7nd0pju8q".to_string(),
+        },AddressInfo {
             chain: "ethereum".to_string(),
             address: "0x699A8B34420A2a3bA1817b2C061ed852448F4170".to_string(),
-        }];
+        }
+        ];
+        
+        // screener cache is empty before the test
+        println!("Cache is empty before the test");
+        let res = screener_cache.is_blacklisted(&addresses).await.unwrap();
+        dbg!(res);
+
+        // calling is blacklisted will fill the cache
         let info = address_screener.is_blacklisted(&addresses).await.unwrap();
         dbg!(&info);
 
+        // cache is filled after the test
+        println!("Cache is filled after the test");
         let res = screener_cache.is_blacklisted(&addresses).await.unwrap();
         dbg!(res);
+
+    }
+
+    #[tokio::test]
+    async fn testing_only_blacklisted_addresses(){
+        let screener_cache = Arc::new(
+            TrmScreenerCache::from_psql_url("postgres://postgres:root@localhost:5432/garden")
+                .await
+                .unwrap(),
+        );
+        let key = env::var("SCREENING_KEY").expect("export SCREENING_KEY in the shell");
+        
+        let trm_cache= Cache::builder()
+                        .max_capacity(1000)
+                        .time_to_live(Duration::from_secs(10))
+                        .build();
+
+        let trm_screener = Arc::new(
+            TrmScreener::builder()
+                .api_key(key)
+                .url("https://api.trmlabs.com/public/v2/screening/addresses".to_string())
+                .batch_size(5)
+                .risk_score_limit(10)
+                .cache(
+                   trm_cache
+                )
+                .build(),
+        );
+
+        let address_screener = AddressScreener::new(trm_screener, screener_cache.clone());
+
+        // let addresses = vec![AddressInfo {
+        //     chain: "ethereum".to_string(),
+        //     address: "0x699A8B34420A2a3bA1817b2C061ed852448F4170".to_string(),
+        // }];
+        let addresses = vec![AddressInfo {
+                chain: "bitcoin".to_string(),
+                address: "bc1qng0keqn7cq6p8qdt4rjnzdxrygnzq7nd0pju8q".to_string(),
+        },AddressInfo {
+                chain: "bitcoin".to_string(),
+                address: "bc1qng0keqn7cq6p8qdt4rjnzdxrygnzq7nd0pju8q".to_string(),
+        }];
+
+        // calling is blacklisted will fill the cache
+        let info = address_screener.is_blacklisted(&addresses).await.unwrap();
+        dbg!(&info);
+
+
     }
 }
+
+
+

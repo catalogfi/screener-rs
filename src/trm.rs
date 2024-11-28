@@ -93,21 +93,33 @@ pub struct TrmScreener {
 }
 
 impl TrmScreener {
-    async fn check_in_cache(&self, addresses: &[AddressInfo]) -> Result<Vec<AddressInfo>> {
+    async fn check_in_cache(&self, addresses: &[AddressInfo]) -> Result<(Vec<AddressInfo>,Vec<AddressInfo>)> {
         let mut maybe_blacklisted_address = Vec::new();
+        let mut whitelisted_addresses = Vec::new();
+        
         for address_info in addresses {
             if self.cache.get(&address_info.id()).await.is_none() {
+                // insert into maybe_blacklisted_address if not found in cache
                 maybe_blacklisted_address.push(address_info.clone());
+            }else{
+                // insert into whitelisted_addresses if found in cache
+                whitelisted_addresses.push(address_info.clone());
             }
         }
-        Ok(maybe_blacklisted_address)
+
+        // return maybe_blacklisted_address and whitelisted_addresses
+        Ok((maybe_blacklisted_address,whitelisted_addresses))
     }
 }
+
+
 
 #[async_trait]
 impl Screener for TrmScreener {
     async fn is_blacklisted(&self, addresses: &[AddressInfo]) -> Result<Vec<ScreenerResponse>> {
-        let non_whitelisted_addresses = self.check_in_cache(addresses).await?;
+        let (non_whitelisted_addresses,whitelisted_addresses) = self.check_in_cache(addresses).await?;
+
+        // If all addresses are whitelisted, return early
         if non_whitelisted_addresses.is_empty() {
             return Ok(addresses
                 .iter()
@@ -121,6 +133,8 @@ impl Screener for TrmScreener {
         let client = Client::new();
 
         let mut all_responses = Vec::new();
+
+        // Split the addresses into batches and send them to the API for screening 
         for batch in non_whitelisted_addresses.chunks(self.batch_size) {
             let inputs: Vec<TrmScreenerApiRequest> = batch.iter().map(|e| e.into()).collect();
 
@@ -156,6 +170,7 @@ impl Screener for TrmScreener {
                     }
                 }
 
+                // Insert into cache if not blacklisted
                 if !blacklisted {
                     self.cache
                         .insert(
@@ -169,7 +184,7 @@ impl Screener for TrmScreener {
                         .await;
                 }
 
-                // Map to ScreenerResponse
+                // Map to ScreenerResponse 
                 let screener_response = ScreenerResponse {
                     address: AddressInfo {
                         address: api_resp.address_submitted.clone(),
@@ -181,10 +196,13 @@ impl Screener for TrmScreener {
                 all_responses.push(screener_response);
             }
         }
+        
 
-        for non_whitelisted in non_whitelisted_addresses {
+        // Add whitelisted addresses to the response
+        for whitelisted_address in whitelisted_addresses {
+            dbg!(&whitelisted_address);
             all_responses.push(ScreenerResponse {
-                address: non_whitelisted,
+                address: whitelisted_address,
                 is_blacklisted: false,
             });
         }
@@ -218,6 +236,81 @@ mod tests {
             .cache(cache.clone())
             .build();
 
+        println!("Testing is_blacklisted with a whitelisted address");
+        // this is a whitelisted address
+        let addresses = vec![
+            AddressInfo {
+                address: "0x9dd9c2d208b07bf9a4ef9ca311f36d7185749635".to_string(),
+                chain: "ethereum".to_string(),
+            },
+        ];
+
+        let result = trm_screener.is_blacklisted(&addresses).await.unwrap();
+        dbg!(&result);
+
+        let cached_result = cache
+            .get("0x9dd9c2d208b07bf9a4ef9ca311f36d7185749635_ethereum")
+            .await
+            .unwrap();
+        assert!(cached_result.timestamp > chrono::Utc::now().timestamp());
+        
+        assert!(!result.is_empty());
+        assert!(!result[0].is_blacklisted);
+
+        println!("Testing is_blacklisted with a blacklisted address");
+        // this is a blacklisted address
+        let address=vec![
+            AddressInfo {
+                chain: "bitcoin".to_string(),
+                address: "bc1qng0keqn7cq6p8qdt4rjnzdxrygnzq7nd0pju8q".to_string(),
+            },
+        ];
+
+        let result = trm_screener.is_blacklisted(&address).await.unwrap();
+        dbg!(&result);
+        assert!(!result.is_empty());
+        let cached_result = cache
+            .get("0bc1qng0keqn7cq6p8qdt4rjnzdxrygnzq7nd0pju8q_bitcoin")
+            .await;
+        assert!(cached_result.is_none());
+        assert!(result[0].is_blacklisted);
+
+
+        // checking is blacklisted with a mix of blacklisted and whitelisted addresses
+        println!("Testing is_blacklisted with a mix of blacklisted and whitelisted addresses");
+        let addresses = vec![
+            AddressInfo {
+                chain: "bitcoin".to_string(),
+                address: "bc1qng0keqn7cq6p8qdt4rjnzdxrygnzq7nd0pju8q".to_string(),
+            },
+            AddressInfo {
+                address: "0x9dd9c2d208b07bf9a4ef9ca311f36d7185749635".to_string(),
+                chain: "ethereum".to_string(),
+            },
+        ];
+
+        let result = trm_screener.is_blacklisted(&addresses).await.unwrap();
+        dbg!(&result);
+        assert!(!result.is_empty());
+
+    }
+
+
+    #[tokio::test]
+    async fn test_check_cache_cleared_after_ttl(){
+        let key = env::var("SCREENING_KEY").expect("export SCREENING_KEY in the shell");
+        let cache = Cache::builder()
+            .max_capacity(1000)
+            .time_to_live(Duration::from_secs(5))
+            .build();
+        let trm_screener = TrmScreener::builder()
+            .api_key(key)
+            .url("https://api.trmlabs.com/public/v2/screening/addresses".to_string())
+            .batch_size(5)
+            .risk_score_limit(10)
+            .cache(cache.clone())
+            .build();
+
         let addresses = vec![
             // AddressInfo {
             //     chain: "bitcoin".to_string(),
@@ -236,8 +329,16 @@ mod tests {
             .get("0x9dd9c2d208b07bf9a4ef9ca311f36d7185749635_ethereum")
             .await
             .unwrap();
-        assert!(cached_result.timestamp > chrono::Utc::now().timestamp());
-        assert!(!result.is_empty());
-        // assert!(result[0].is_blacklisted);
+        
+        dbg!(&cached_result);
+        println!("Sleeping for 5 seconds");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let cached_result = cache
+            .get("0x9dd9c2d208b07bf9a4ef9ca311f36d7185749635_ethereum")
+            .await;
+        assert!(cached_result.is_none());
+        // assert!(cached_result.is_some());
     }
+
+
 }
