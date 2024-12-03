@@ -54,8 +54,10 @@ impl ScreenerCache for TrmScreenerCache {
         Ok(addresses
             .iter()
             .map(|address_info| {
+                // TODO: can be optimized by using HashSet
                 let is_blacklisted = existing_addresses.contains(&address_info.address);
 
+                
                 ScreenerCacheResponse {
                     address: address_info.clone(),
                     is_blacklisted,
