@@ -2,16 +2,10 @@
 
 A server application to check whether an address is blacklisted or not. The service uses a screener API to determine the blacklist status of provided addresses.
 
----
-
 ## Features
 
 - Screen addresses to check blacklist status.
 - Limit batch size for requests to avoid overload.
-
----
-
----
 
 ## Create Configuration File
 
@@ -38,8 +32,6 @@ Config Descriptions:
 - risk_score_limit: Threshold for blacklisting based on risk score.
 - whitelisted_addresses: A list of addresses excluded from blacklist checks.
 - request_batch_size: Maximum number of addresses allowed per screening request.
-
----
 
 ## API Endpoints
 
