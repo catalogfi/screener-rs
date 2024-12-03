@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use eyre::Result;
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+
 pub struct AddressInfo {
     pub chain: String,
     pub address: String,
@@ -13,7 +15,7 @@ impl AddressInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug,Serialize,Deserialize)]
 pub struct ScreenerResponse {
     pub address: AddressInfo,
     pub is_blacklisted: bool,
