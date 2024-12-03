@@ -1,85 +1,146 @@
-#![allow(warnings)]
+// config
+mod config;
 
-use actix_cors::Cors;
-use actix_web::web::Data;
-use actix_web::{get, App, HttpServer, Responder};
+use axum::{
+    routing::{get, post},
+    Json, Router, Extension,
+};
+use serde_json::json;
+use std::{error::Error, sync::Arc};
+use tokio::sync::RwLock;
+use tower_http::cors::{Any, CorsLayer};
+
+// trmlabs imports
 use trm_labs::address_screener::AddressScreener;
 use trm_labs::cache::TrmScreenerCache;
+use trm_labs::interface::AddressInfo;
 use trm_labs::trm::TrmScreener;
 
-// imports
-use std::error::Error;
-use std::env;
-use std::sync::Arc;
 
-#[get("/")]
-async fn index() -> impl Responder {
-    "server index route hit"
+// app state
+pub struct AppState {
+    address_screener: Arc<RwLock<AddressScreener<TrmScreener, TrmScreenerCache>>>,
+    config: config::Config,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    
-    // create a trm screener as app state
-    let trm_screener = get_address_screener().await?; 
+    // laod configuration
+    let config = config::Config::load()?;
+    // Create the TRM screener
+    let address_screener = get_address_screener(&config).await?;
 
-    // creatng the app state with the trm screener
-    let app_state = Data::new(trm_screener);
+    // Define the application state
+    let app_state = Arc::new(AppState {
+        address_screener: Arc::new(RwLock::new(address_screener)),
+        config,
+    });
 
-    // Starting the server
-    let server = HttpServer::new(move || {
-        App::new()
-            .app_data(Data::new(app_state.clone()))
-            .wrap(
-                Cors::default() // Allows all origins
-                    .allow_any_origin() // Allows all origins
-                    .allow_any_method() // Allows all HTTP methods (GET, POST, etc.)
-                    .allow_any_header(), // Allows all headers
-            )
-            .service(index)
-            .service(trm_labs::handlers::screener_handler)
-            
-    })
-    .bind("0.0.0.0:3003")?
-    .run();
+    // Define the Axum app
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/screening/addresses", post(screener_handler))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
+        .layer(Extension(app_state));
 
-    println!("Server running at http://0.0.0.0:3003");
-    server.await?;
-
+    // Define the server address and start the server
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    println!("Server running at http://{}", "0.0.0.0:3000");
+    axum::serve(listener, app).await?;
     Ok(())
 }
 
-// Funtion to get the address screener
-async fn get_address_screener() -> Result<AddressScreener<TrmScreener, TrmScreenerCache>, Box<dyn Error>> {
-    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+// Index route
+async fn index() -> &'static str {
+    println!("/GET / hit");
+    "server index route hit"
+}
 
-    // create a trm screener cache
+// Screening handler
+async fn screener_handler(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Json(addresses): Json<Vec<AddressInfo>>,
+) -> (axum::http::StatusCode, Json<serde_json::Value>) {
+
+    println!("/POST /screening/addresses hit");
+
+    // limiting the number of addresses to be screened
+    if addresses.len() > app_state.config.request_batch_size  {
+        // bad request
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({"error": "Batch size limit exceeded"})),
+        );
+    }
+
+
+    let addresses= remove_duplicates(addresses);
+    let screener = app_state.address_screener.read().await;
+    match screener.is_blacklisted(&addresses).await {
+        Ok(result) => {
+            let formatted_result: Vec<_> = result.into_iter().map(|entry| {
+            json!({
+                "address": entry.address.address,
+                "chain": entry.address.chain,
+                "is_blacklisted": entry.is_blacklisted
+            })
+            }).collect();
+            (axum::http::StatusCode::OK, Json(json!(formatted_result)))
+        },
+        Err(e) => {
+            let error_message = format!("Error: {:?}", e);
+            (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": error_message })))
+        }
+    }
+}
+
+// Function to initialize the TRM screener
+async fn get_address_screener(config:&config::Config) -> Result<AddressScreener<TrmScreener, TrmScreenerCache>, Box<dyn Error>> {
+    let database_url = config.db_url.clone();
+    let key=config.screener_api_key.clone();
+    let risk_score_limit=config.risk_score_limit;
+    let always_whitelisted=config.whitelisted_addresses.clone();
+
+    // creating a always whitelisted set
+    let always_whitelisted: std::collections::HashSet<String> = always_whitelisted.into_iter().collect();
+
+
+    // Create the TRM screener cache
     let screener_cache = Arc::new(
-            TrmScreenerCache::from_psql_url(&database_url)
-                .await
-                .unwrap(),
-        );
+        TrmScreenerCache::from_psql_url(&database_url)
+            .await
+            .unwrap(),
+    );
 
-        // create a trm screener
-        let key = env::var("SCREENING_KEY").expect("export SCREENING_KEY in the shell");
-        let trm_screener = Arc::new(
-            TrmScreener::builder()
-                .api_key(key)
-                .url("https://api.trmlabs.com/public/v2/screening/addresses".to_string())
-                .batch_size(5)
-                .risk_score_limit(10)
-                .cache(
-                    moka::future::Cache::builder()
-                        .max_capacity(1000)
-                        .time_to_live(std::time::Duration::from_secs(7200))
-                        .build(),
-                )
-                .build(),
-        );
+    
+    let trm_screener = Arc::new(
+        TrmScreener::builder()
+            .api_key(key)
+            .url("https://api.trmlabs.com/public/v2/screening/addresses".to_string())
+            .batch_size(10)
+            .risk_score_limit(risk_score_limit)
+            .cache(
+                moka::future::Cache::builder()
+                    .max_capacity(1000)
+                    .time_to_live(std::time::Duration::from_secs(7200))
+                    .build(),
+            ).always_whitelisted(always_whitelisted)
+            .build(),
+    );
 
-        //create an address screener 
-        let address_screener = AddressScreener::new(trm_screener, screener_cache);
+    // Create an address screener
+    let address_screener = AddressScreener::new(trm_screener, screener_cache);
 
-     
     Ok(address_screener)
+}
+
+
+fn remove_duplicates(addresses: Vec<AddressInfo>) -> Vec<AddressInfo> {
+    let mut seen = std::collections::HashSet::new();
+    addresses.into_iter().filter(|e| seen.insert(e.clone())).collect()
 }

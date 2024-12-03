@@ -90,6 +90,7 @@ pub struct TrmScreener {
     batch_size: usize,
     risk_score_limit: i32,
     cache: Cache<String, CacheRecord<bool>>,
+    always_whitelisted: std::collections::HashSet<String>,
 }
 
 impl TrmScreener {
@@ -98,6 +99,11 @@ impl TrmScreener {
         let mut whitelisted_addresses = Vec::new();
         
         for address_info in addresses {
+            if self.always_whitelisted.contains(&address_info.address) {
+                whitelisted_addresses.push(address_info.clone());
+                println!("-->received a always whitelisted address {}",address_info.address);
+                continue;
+            }
             if self.cache.get(&address_info.id()).await.is_none() {
                 // insert into maybe_blacklisted_address if not found in cache
                 maybe_blacklisted_address.push(address_info.clone());
@@ -118,9 +124,12 @@ impl TrmScreener {
 impl Screener for TrmScreener {
     async fn is_blacklisted(&self, addresses: &[AddressInfo]) -> Result<Vec<ScreenerResponse>> {
         let (non_whitelisted_addresses,whitelisted_addresses) = self.check_in_cache(addresses).await?;
-
+        
+        dbg!(&non_whitelisted_addresses);
+        dbg!(&whitelisted_addresses);
         // If all addresses are whitelisted, return early
         if non_whitelisted_addresses.is_empty() {
+            println!("All addresses are whitelisted");
             return Ok(addresses
                 .iter()
                 .map(|e| ScreenerResponse {
@@ -137,7 +146,7 @@ impl Screener for TrmScreener {
         // Split the addresses into batches and send them to the API for screening 
         for batch in non_whitelisted_addresses.chunks(self.batch_size) {
             let inputs: Vec<TrmScreenerApiRequest> = batch.iter().map(|e| e.into()).collect();
-
+            println!("Sending batch of {} addresses to the API", inputs.len());
             // Make API request
             let response = client
                 .post(&self.url) // Post request to the URL
@@ -234,6 +243,7 @@ mod tests {
             .batch_size(5)
             .risk_score_limit(10)
             .cache(cache.clone())
+            .always_whitelisted(std::collections::HashSet::new())
             .build();
 
         println!("Testing is_blacklisted with a whitelisted address");
@@ -309,6 +319,7 @@ mod tests {
             .batch_size(5)
             .risk_score_limit(10)
             .cache(cache.clone())
+            .always_whitelisted(std::collections::HashSet::new())
             .build();
 
         let addresses = vec![

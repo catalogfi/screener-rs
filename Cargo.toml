@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-actix-cors = "0.7.0"
-actix-web = "4.9.0"
 async-trait = "0.1.83"
+axum = "0.7.9"
 bon = "2.3.0"
 chrono = "0.4.38"
 eyre = "0.6.12"
@@ -20,3 +19,4 @@ sqlx = { version = "0.8.2", features = [
   "postgres",
 ] }
 tokio = { version = "1.40.0", features = ["full", "rt-multi-thread"] }
+tower-http = { version = "0.6.2", features = ["cors"] }

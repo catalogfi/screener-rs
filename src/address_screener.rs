@@ -27,6 +27,7 @@ impl<T: Screener, S: ScreenerCache> AddressScreener<T, S> {
             .filter(|res| res.not_found)
             .collect();
 
+        dbg!(&not_found_addresses);
         // Step:3 If empty, then we found all addresses, hence return the response
         if not_found_addresses.is_empty() {
             return Ok(response.into_iter().map(|v| v.into()).collect());
@@ -34,6 +35,7 @@ impl<T: Screener, S: ScreenerCache> AddressScreener<T, S> {
 
         // we did not find only few items
         if addresses.len() != not_found_addresses.len() {
+            dbg!("Some addresses are not found  screener cache");
             // Extract the list of `AddressInfo` for the not found addresses
             let missing_addresses: Vec<AddressInfo> = not_found_addresses
                 .iter()
@@ -60,8 +62,8 @@ impl<T: Screener, S: ScreenerCache> AddressScreener<T, S> {
             combined_response.extend(screener_response);
             Ok(combined_response)
         } else {
+            dbg!("All addresses are not found in screener cache");
             // we found nothing in db
-            dbg!("Nothing found in screener cache");
             let res = self.screener.is_blacklisted(addresses).await?;
             self.screener_cache.mark_blacklisted(&res).await?;
             Ok(res)
@@ -71,7 +73,7 @@ impl<T: Screener, S: ScreenerCache> AddressScreener<T, S> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, sync::Arc, time::Duration};
+    use std::{collections::HashSet, env, sync::Arc, time::Duration};
 
     use moka::future::Cache;
 
@@ -105,6 +107,7 @@ mod tests {
                 .cache(
                    trm_cache
                 )
+                .always_whitelisted(HashSet::new())
                 .build(),
         );
 
@@ -161,7 +164,7 @@ mod tests {
                 .risk_score_limit(10)
                 .cache(
                    trm_cache
-                )
+                ).always_whitelisted(HashSet::new())
                 .build(),
         );
 
